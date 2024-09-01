@@ -345,14 +345,22 @@ class FileSync():
 
         filepath = path.split(",")[0]   
         dir = os.path.dirname(filepath) 
-        basename = os.path.basename(filepath)   # get file name with suffix
-        filename = os.path.splitext(basename)   # get file name
-        name = filename[0]
-        ext = filename[1]
-        t = time.strftime("%Y%m%d%H%M",time.localtime())
-        newname = name + t + ext 
-        newfilepath = os.path.join(dir,newname)
-        os.rename(filepath,newfilepath)
+        if os.access(filepath,os.F_OK):
+            basename = os.path.basename(filepath)   # get file name with suffix
+            filename = os.path.splitext(basename)   # get file name
+            name = filename[0]
+            ext = filename[1]
+            t = time.strftime("%Y%m%d%H%M",time.localtime())
+            newname = name + t + ext 
+            newfilepath = os.path.join(dir,newname)
+            os.rename(filepath,newfilepath)
+            msg = "File: "+ filepath + " is bankup to " + newfilepath
+            print(msg)
+            self.logger.info(msg)            
+        else:
+            msg = "File: "+ filepath + " is locked by other programm. bankup fail."
+            print(msg)
+            self.logger.info(msg)
 
 
     def updateRemote(self,con, path):
