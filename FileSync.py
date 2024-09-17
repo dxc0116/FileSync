@@ -339,7 +339,6 @@ class FileSync():
             self.logger.info(msg)
         return 0
     
-    '''文件改名，并备份'''
     def bankupFile(self, path):
         """Rename file and bankup a copy and bankup time."""
 
@@ -401,7 +400,7 @@ class FileSync():
         print(msg)
         self.logger.info(msg)
 
-    '''同步进程，根据是否需要同步参数，启停同步过程'''
+
     def startSync(self):
         """Compare local directory to the remote directory,
         then push new local file to remote, and get new file in remote.
