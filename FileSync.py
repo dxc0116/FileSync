@@ -28,7 +28,6 @@ import time
 import logging
 import inspect
 import configparser
-import sys
 
 
 class FileSync():
@@ -60,6 +59,7 @@ class FileSync():
     CM_PUSH_FILE = "<-push_file->".encode()
     CM_SEND_OVER = "<-send_over->".encode()
     CM_SYNC_OVER = "<-sync_over->".encode()
+    CM_FETCH_PATH ="<-fetch_path->".encode()
     
 
     def __init__(self):
@@ -74,7 +74,7 @@ class FileSync():
         self.clientip = self.readconfig("host","client")
         self.serverip = self.readconfig("host","server")
         self.port = int(self.readconfig("host","port"))
-        self.needsync = self.readconfig("status","needsync")  #to determine whether sync service need to start.
+        self.fullsync = self.readconfig("sync","full")  
         
         self.logger = self._getLogger()
 
@@ -141,7 +141,12 @@ class FileSync():
         self.logger.info(msg)
         folderlist = []
         try:
-            con.sendall(self.CM_FETCH_DIR)  
+            con.sendall(self.CM_FETCH_DIR)
+            while True:
+                recv = con.recv(128)
+                if recv == self.CM_FETCH_PATH:
+                    con.sendall((self.localpath+","+self.remotepath).encode())
+                    break
             while True:
                 recv = con.recv(128)
                 if recv == self.CM_FETCH_TIME: #send last sync time
@@ -157,7 +162,7 @@ class FileSync():
                         folderlist.append(recv.decode())
             msg = "Receive " + str(len(folderlist)) + " directory info."
         except Exception as e:
-            msg = "Get the remote directory failed:" + e.args
+            msg = "Get the remote directory failed:" + e.args[0]
         print(msg)  
         self.logger.info(msg)
         return folderlist
@@ -195,28 +200,33 @@ class FileSync():
         for localinfo in local:
             localdetail = localinfo.split(",")
             localfiletime = int(localdetail[3])
+            localname = localdetail[0].replace(self.localpath,"")
             findsame = ""
             for remoteinfo in remote:
                 remotedetail = remoteinfo.split(",")
                 remotefiletime = int(remotedetail[3])
-
+                remotename = remotedetail[0].replace(self.remotepath,"")
                 # have the same name
-                if (localdetail[0] == remotedetail[0]):
-                    findsame = remoteinfo   
+                if localname == remotename:
+                #if (localdetail[0] == remotedetail[0]):
+                    #findsame = remoteinfo   
                     # if type is directory
                     if localdetail[1] == "d":
                         findsame = remoteinfo
                         break
-                    # if have same size
+                    # because two pc have time difference, so first compare file size.
                     if localdetail[2] == remotedetail[2]:
+                        # if two file have same filename and size, and their mtime diff less then 3 second 
                         findsame = remoteinfo
                         break
                     else:
-                        if (remotefiletime-localfiletime) > 3 :   
-                            diff.append((remoteinfo,"new in remote"))  
+                        if (remotefiletime-localfiletime) >= 3 :   
+                            diff.append((remoteinfo,"new in remote")) 
+                            break 
 
-                        if (localfiletime-remotefiletime) > 3:  
-                            diff.append((localinfo,"new in local"))     
+                        if (localfiletime-remotefiletime) >= 3:  
+                            diff.append((localinfo,"new in local"))
+                            break    
                         
             if findsame: 
                 remote.remove(findsame)  #delete same item, reduce running time.
@@ -251,36 +261,42 @@ class FileSync():
 
     def recvFile(self, con, filepath):
         """Receive a file and save it to specific directory."""
-
+        # deal the file name and size info.
         fileinfo = filepath.split(",")
         filename = fileinfo[0]
+        filename = filename.replace(self.remotepath,self.localpath) # replace the target folder
         filesize = int(fileinfo[2])
-        msg = "Receiving file which name is " + filename + "size:" + str(filesize)
+        msg = "Receiving file which name is " + filename + ",size:" + str(filesize)
         self.logger.info(msg)
-
-        if os.path.exists(filename):    #if have same file,bankup local file.
-            self.bankupFile(filename)   
-            self.logger.info("Bankup old file what's name is same.")
-
-        file = open(filename,"wb")
+        
+        # if this pc has a samename file,bankup local file first.
+        if os.path.exists(filename):    
+            status = self.bankupFile(filename)   
+            # self.logger.info("Bankup old file what's name is same.")
+            # if backup fail , save receive file as a new file name with sync.
+            if status == -1:
+                filename = filename.split(".")[0] + "_sync." + filename.split(".")[-1]
+        
+        # receive file and save.
         recvsize = 0
-        while recvsize < filesize:
-            if (filesize - recvsize) > 1024:
-                recv = con.recv(1024)
-            else:
-                recv = con.recv(filesize-recvsize)
-            recvsize = recvsize + len(recv)
-            file.write(recv)
+        with open(filename,"wb") as f:
+            recv = None
+            while recvsize < filesize:
+                if (filesize - recvsize) > 1024:
+                    recv = con.recv(1024)
+                else:
+                    recv = con.recv(filesize-recvsize)
+                recvsize = recvsize + len(recv)
+                f.write(recv)
 
-        msg = "End receive file " + filename
+        msg = "Receive and save file: " + filename
         self.logger.info(msg)
-        file.close()
         return recvsize
 
 
     def recvDir(self,dir):
         """Receive remote directory and create on local computer."""
-
+        dir = dir.replace(self.remotepath,self.localpath)
         if os.path.exists(dir):
             msg = "The local computer has same directory:" + dir
             print(msg)
@@ -301,13 +317,15 @@ class FileSync():
         msg = "Getting remote file:" + filepath
         print(msg)
         self.logger.info(msg)
+        # replace remote path to 
+        localfp = filepath.replace(self.remotepath,self.localpath)
         type = path.split(",")[1]
         if type == "d": # directory
-            if os.path.exists(filepath):
-                msg = "Local computer has same directory:" + filepath
+            if os.path.exists(localfp):
+                msg = "Local computer has same directory:" + localfp
             else:
-                msg = "Create new directory:" + filepath
-                os.mkdir(filepath)  
+                msg = "Create new directory:" + localfp
+                os.mkdir(localfp)  
             print(msg)
             self.logger.info(msg)
         else:   # file
@@ -318,13 +336,14 @@ class FileSync():
             filesize = int(path.split(",")[2])
             
             # bankup file which has same name in local
-            if os.path.exists(filepath):
-                msg = "Local computer has same name file, bankup the file:" + filepath
+    
+            if os.path.exists(localfp):
+                msg = "Local computer has same name file, bankup the file:" + localfp
                 print(msg)
                 self.logger.info(msg)
-                self.bankupFile(filepath)
+                self.bankupFile(localfp)
 
-            file = open(filepath,"wb")
+            file = open(localfp,"wb")
             recvsize = 0
             while recvsize < filesize:
                 if (filesize - recvsize) > 1024:
@@ -334,7 +353,7 @@ class FileSync():
                 recvsize = recvsize + len(recv)
                 file.write(recv)
             file.close()
-            msg = "End receive and save file:" + filepath
+            msg = "End receive and save file:" + localfp
             print(msg)
             self.logger.info(msg)
         return 0
@@ -350,16 +369,24 @@ class FileSync():
             name = filename[0]
             ext = filename[1]
             t = time.strftime("%Y%m%d%H%M",time.localtime())
-            newname = name + t + ext 
+            newname = name + t  + ext 
             newfilepath = os.path.join(dir,newname)
-            os.rename(filepath,newfilepath)
-            msg = "File: "+ filepath + " is bankup to " + newfilepath
-            print(msg)
-            self.logger.info(msg)            
+            try:
+                os.rename(filepath,newfilepath)
+                msg = "File: "+ filepath + " is bankup to " + newfilepath
+                result = 0
+            except:
+                msg = "File: "+ filepath + " access error, rename fail."
+                result = -1
+            finally:
+                print(msg)
+                self.logger.info(msg)
+                return result            
         else:
             msg = "File: "+ filepath + " is locked by other programm. bankup fail."
             print(msg)
             self.logger.info(msg)
+            return -1
 
 
     def updateRemote(self,con, path):
@@ -396,7 +423,7 @@ class FileSync():
             time.sleep(0.1)
         con.sendall(self.CM_SEND_OVER)
 
-        msg = "Send " + str(len(folder)) + "to remote."
+        msg = "Send " + str(len(folder)) + " path to remote."
         print(msg)
         self.logger.info(msg)
 
@@ -405,58 +432,54 @@ class FileSync():
         """Compare local directory to the remote directory,
         then push new local file to remote, and get new file in remote.
         """
-        while self.needsync:
-            msg = "Starting file sync between " + self.clientip + " and " + self.serverip
+        msg = "Starting two-way file sync between " + self.clientip + " and " + self.serverip
+        print(msg)
+        self.logger.info(msg)
+        con = self.connect()           
+        localfolder = []
+        remotefolder = []    
+
+        now = int(time.time())
+        if self.fullsync: 
+            lastsync = 0
+            msg = "Start full sync, sync all files in both folder."
+        else:
+            msg = "Start increment sync. The last sync time is:" + self.synctime
+            lastsync = time.strptime(self.synctime,"%Y-%m-%d %H:%M:%S")
+            lastsync = int(time.mktime(lastsync))
+        print(msg)
+        self.logger.info(msg)
+
+        if now > lastsync:
+            localfolder = self.getFolder(self.localpath,lastsync)               
+            remotefolder = self.getRemoteFolder(con,self.remotepath,lastsync)
+        else:
+            msg ="Now is not the scheduled sync time:" + self.synctime + "end sync."
             print(msg)
             self.logger.info(msg)
-            con = self.connect()           
-            localfolder = []
-            remotefolder = []    
+        
+        #compare difference        
+        diff = self.getDiff(localfolder,remotefolder)
 
-            now = int(time.time())
-            if self.synctime == "" : 
-                lastsync = 0
-                msg = "First time sync, start full sync."
-            else:
-                msg = "The last sync time is:" + self.synctime
-                lastsync = time.strptime(self.synctime,"%Y-%m-%d %H:%M:%S")
-                lastsync = int(time.mktime(lastsync))
-            print(msg)
-            self.logger.info(msg)
+        if diff:
+            msg = "Start deal diff directory|file one by one."
+            for i in diff:
+                if (i[1] == "new in remote") or i[1] == "only in remote":
+                    self.getRemoteFile(con, i[0])
+                if (i[1] == "new in local") or (i[1] == "only in local"):
+                    self.updateRemote(con, i[0])
+        else:
+            msg = "No difference found after last sync, end sync."
+        
+        con.sendall(self.CM_SYNC_OVER)
+        con.close()
+        print(msg)
+        self.logger.info(msg)
 
-            if now > lastsync:
-                localfolder = self.getFolder(self.localpath,lastsync)               
-                remotefolder = self.getRemoteFolder(con,self.remotepath,lastsync)
-                msg = "Get the local and remote directory info." 
-                print(msg)
-                self.logger.info(msg)
-            else:
-                msg ="Now is not the scheduled sync time:" + self.synctime + "end sync."
-                print(msg)
-                self.logger.info(msg)
-                break
-
-            #compare difference        
-            diff = self.getDiff(localfolder,remotefolder)
-
-            if diff:
-                msg = "Start deal diff directory|file one by one."
-                for i in diff:
-                    if (i[1] == "new in remote") or i[1] == "only in remote":
-                        self.getRemoteFile(con, i[0])
-                    if (i[1] == "new in local") or (i[1] == "only in local"):
-                        self.updateRemote(con, i[0])
-            else:
-                msg = "No difference found after last sync, end sync."
-            print(msg)
-            self.logger.info(msg)
-            self.needsync = False
-            self.setconfig("time","synctime",time.strftime("%Y-%m-%d %H:%M:%S",time.localtime()))
-            con.sendall(self.CM_SYNC_OVER)
-            con.close()
-            msg = "End sync with " + self.serverip +", save new sync time to config.ini."
-            print(msg)
-            self.logger.info(msg)
+        self.setconfig("time","synctime",time.strftime("%Y-%m-%d %H:%M:%S",time.localtime()))
+        msg = "End sync and close connect with " + self.serverip +", save new sync time to config.ini."
+        print(msg)
+        self.logger.info(msg)
         return 0
 
 
@@ -490,14 +513,24 @@ class FileSync():
                         msg = "Receive comand of fetch directory"  
                         print(msg)
                         self.logger.info(msg)
-                        con.sendall(self.CM_FETCH_TIME)
+                        con.sendall(self.CM_FETCH_PATH) # request remote to send sync folder
+                        while True:
+                            syncpath = con.recv(1024).decode()
+                            self.localpath = syncpath.split(",")[1]
+                            self.remotepath = syncpath.split(",")[0]
+                            msg = "receive require sync path between:" + self.localpath + "to" + self.remotepath
+                            print(msg)
+                            self.logger.info(msg)
+                            break
+                        con.sendall(self.CM_FETCH_TIME) # request last sync time
                         while True:  
                             recv = con.recv(4)
                             synctime = int.from_bytes(recv,byteorder="little")
                             # get details of directory which need sync.
                             folderinfo = self.getFolder(self.localpath,synctime)
-                            self.sendFolder(con,folderinfo) #send directory details to client
-                            msg = "Send details of request directory to client."
+                            # send directory details to client
+                            self.sendFolder(con,folderinfo) 
+                            msg = "Send details of request directory:" + self.localpath
                             self.logger.info(msg)
                             break
                         continue
@@ -509,7 +542,6 @@ class FileSync():
                         while True:
                             filepath = con.recv(1024).decode()
                             if filepath: 
-                                #print(filepath)
                                 break
                         self.sendFile(con,filepath)
                         continue
@@ -523,7 +555,7 @@ class FileSync():
                             print(filepath)
                             if filepath:
                                 self.recvFile(con,filepath)
-                                msg ="Get the file and save it."
+                                msg ="Get the file and save it." + filepath
                                 self.logger.info(msg)
                                 break
                         continue
@@ -536,7 +568,7 @@ class FileSync():
                             filepath = con.recv(1024).decode()
                             if filepath:
                                 self.recvDir(filepath)
-                                self.logger.info("get the dir name.")
+                                self.logger.info("get the dir name." + filepath)
                                 break
                             continue
                     if recv == self.CM_SEND_OVER:
@@ -549,7 +581,6 @@ class FileSync():
                         self.logger.info(msg)
                         self.setconfig("time","synctime",time.strftime("%Y-%m-%d %H:%M:%S",time.localtime()))
                         break
-              
         return 0
     
 if __name__ == "__main__":
